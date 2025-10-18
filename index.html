@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Furniture Placer Pro</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        }
+
+        #ar-button {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            background-color: #007bff;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #ar-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        #furniture-menu {
+            position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px;
+            display: none; grid-template-columns: repeat(2, 1fr); gap: 10px;
+        }
+        .furniture-item {
+            aspect-ratio: 1; border: 2px solid transparent; cursor: pointer;
+            border-radius: 4px; position: relative; text-align: center;
+            color: white; font-size: 12px; padding-top: 30px; background: #333;
+        }
+        .furniture-item:hover { border-color: #fff; }
+        .furniture-item.active { border-color: #28a745; background: #28a745 !important; }
+    </style>
+</head>
+<body>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        let camera, scene, renderer;
+        let controller;
+        let reticle;
+
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        let ghostChair;
+        let placementMode = false;
+        let selectedChair = null;
+        const chairs = [];
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+        const tempScale = new THREE.Vector3();
+        const tempMatrix = new THREE.Matrix4();
+        let additionalPlacementRotation = 0;
+        let draggingObject = null;
+
+        let chairButton, confirmButton, deleteButton, snapshotButton;
+        let rotationControls, rotateLeftButton, rotateRightButton;
+        let placementHint, loadingIndicator;
+
+        let modelLoaded = false;
+
+        const furnitureLibrary = {
+            chair: { file: 'Office Chair.glb', scale: 0.5, name: 'Chair' },
+            sofa: { file: 'sofa.glb', scale: 0.8, name: 'Sofa' },
+            table: { file: 'table.glb', scale: 0.03, name: 'Table' },
+            lamp: { file: 'lamp.glb', scale: 0.09, name: 'Lamp' }
+        };
+        let loadedModels = {};
+        let currentFurnitureType = 'chair';
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.createElement('div');
+            document.body.appendChild(container);
+
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+            light.position.set(0.5, 1, 0.25);
+            scene.add(light);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'],
+                domOverlay: { root: document.body }
+            });
+            arButton.id = 'ar-button';
+            document.body.appendChild(arButton);
+
+            loadingIndicator = document.createElement('div');
+            loadingIndicator.id = 'loading-indicator';
+            loadingIndicator.textContent = 'Loading furniture models...';
+            loadingIndicator.style.cssText = 'position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 4px; animation: pulse 1.5s infinite;';
+            document.body.appendChild(loadingIndicator);
+
+            const loader = new GLTFLoader();
+            let loadedCount = 0;
+            let totalCount = Object.keys(furnitureLibrary).length;
+
+            Object.entries(furnitureLibrary).forEach(([key, item]) => {
+                loader.load(
+                    item.file,
+                    (gltf) => {
+                        loadedModels[key] = gltf.scene;
+                        loadedModels[key].scale.set(item.scale, item.scale, item.scale);
+                        loadedCount++;
+                        if (loadedCount === totalCount) {
+                            modelLoaded = true;
+                            loadingIndicator.remove();
+                            console.log('✅ ALL MODELS LOADED!');
+                        }
+                        console.log(`✅ Loaded: ${item.name}`);
+                    },
+                    undefined,
+                    (error) => {
+                        console.error(`❌ ${item.name}:`, error);
+                        loadedCount++;
+                        if (loadedCount === totalCount) {
+                            modelLoaded = true;
+                            loadingIndicator.remove();
+                        }
+                    }
+                );
+            });
+
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect);
+            controller.addEventListener('selectstart', onDragStart);
+            controller.addEventListener('selectend', onDragEnd);
+            scene.add(controller);
+
+            window.addEventListener('touchstart', onTouchStart);
+            window.addEventListener('touchmove', onTouchMove);
+            window.addEventListener('touchend', onTouchEnd);
+
+            reticle = new THREE.Mesh(
+                new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            renderer.xr.addEventListener('sessionstart', setupUI);
+            renderer.xr.addEventListener('sessionend', teardownUI);
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function setupUI() {
+            const arButton = document.getElementById('ar-button');
+            arButton.style.display = 'none';
+
+            const buttonContainer = document.createElement('div');
+            buttonContainer.id = 'button-container';
+            buttonContainer.style.cssText = 'position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; flex-direction: column; align-items: center; background-color: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px;';
+            document.body.appendChild(buttonContainer);
+
+            chairButton = document.createElement('button');
+            chairButton.id = 'chair-button';
+            chairButton.textContent = '🛋️ Add Furniture';
+            chairButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: white; background: #007bff; border: none; border-radius: 4px;';
+            chairButton.disabled = !modelLoaded;
+            buttonContainer.appendChild(chairButton);
+
+            const furnitureMenu = document.createElement('div');
+            furnitureMenu.id = 'furniture-menu';
+            furnitureMenu.innerHTML = `
+                <div class="furniture-item" data-type="chair">Chair</div>
+                <div class="furniture-item" data-type="sofa">Sofa</div>
+                <div class="furniture-item" data-type="table">Table</div>
+                <div class="furniture-item" data-type="lamp">Lamp</div>
+            `;
+            document.body.appendChild(furnitureMenu);
+
+            confirmButton = document.createElement('button');
+            confirmButton.id = 'confirm-button';
+            confirmButton.textContent = '✅ Confirm';
+            confirmButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: white; background: #28a745; border: none; border-radius: 4px; display: none;';
+            buttonContainer.appendChild(confirmButton);
+
+            deleteButton = document.createElement('button');
+            deleteButton.textContent = '🗑️ Delete';
+            deleteButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: white; background: #dc3545; border: none; border-radius: 4px; display: none;';
+            buttonContainer.appendChild(deleteButton);
+
+            snapshotButton = document.createElement('button');
+            snapshotButton.textContent = '📷 Photo';
+            snapshotButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: black; background: #ffc107; border: none; border-radius: 4px;';
+            buttonContainer.appendChild(snapshotButton);
+
+            rotationControls = document.createElement('div');
+            rotationControls.id = 'rotation-controls';
+            rotationControls.style.cssText = 'display: none; margin-top: 10px;';
+            buttonContainer.appendChild(rotationControls);
+
+            rotateLeftButton = document.createElement('button');
+            rotateLeftButton.id = 'rotate-left';
+            rotateLeftButton.textContent = '↺';
+            rotateLeftButton.style.cssText = 'margin: 0 5px; padding: 10px; min-width: 40px; font-size: 14px; color: white; background: #6c757d; border: none; border-radius: 4px;';
+            rotationControls.appendChild(rotateLeftButton);
+
+            rotateRightButton = document.createElement('button');
+            rotateRightButton.id = 'rotate-right';
+            rotateRightButton.textContent = '↻';
+            rotateRightButton.style.cssText = 'margin: 0 5px; padding: 10px; min-width: 40px; font-size: 14px; color: white; background: #6c757d; border: none; border-radius: 4px;';
+            rotationControls.appendChild(rotateRightButton);
+
+            placementHint = document.createElement('div');
+            placementHint.id = 'placement-hint';
+            placementHint.textContent = 'Move device to see GREEN RING, rotate, then confirm';
+            placementHint.style.cssText = 'position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 4px; display: none;';
+            document.body.appendChild(placementHint);
+
+            chairButton.addEventListener('click', () => {
+                if (!modelLoaded) return;
+                const menu = document.getElementById('furniture-menu');
+                menu.style.display = menu.style.display === 'grid' ? 'none' : 'grid';
+            });
+
+            document.querySelectorAll('.furniture-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    currentFurnitureType = e.currentTarget.dataset.type;
+                    document.querySelectorAll('.furniture-item').forEach(i => i.classList.remove('active'));
+                    e.currentTarget.classList.add('active');
+                    document.getElementById('furniture-menu').style.display = 'none';
+                    
+                    placementMode = true;
+                    if (ghostChair) scene.remove(ghostChair);
+                    ghostChair = loadedModels[currentFurnitureType].clone();
+                    ghostChair.traverse(function (child) {
+                        if (child.isMesh) {
+                            child.material = new THREE.MeshBasicMaterial({
+                                color: 0x007bff, transparent: true, opacity: 0.5
+                            });
+                        }
+                    });
+                    ghostChair.visible = false;
+                    scene.add(ghostChair);
+                    
+                    chairButton.textContent = '❌ Cancel';
+                    confirmButton.style.display = 'block';
+                    rotationControls.style.display = 'flex';
+                    placementHint.style.display = 'block';
+                    deleteButton.style.display = 'none';
+                    additionalPlacementRotation = 0;
+                });
+            });
+
+            confirmButton.addEventListener('click', confirmPlacement);
+            deleteButton.addEventListener('click', deleteSelected);
+            snapshotButton.addEventListener('click', takeSnapshot);
+
+            rotateLeftButton.addEventListener('click', () => {
+                if (placementMode && ghostChair) {
+                    additionalPlacementRotation += Math.PI / 4;
+                } else if (selectedChair) {
+                    selectedChair.rotation.y += Math.PI / 4;
+                    selectedChair.userData.selectionBox?.update();
+                }
+            });
+
+            rotateRightButton.addEventListener('click', () => {
+                if (placementMode && ghostChair) {
+                    additionalPlacementRotation -= Math.PI / 4;
+                } else if (selectedChair) {
+                    selectedChair.rotation.y -= Math.PI / 4;
+                    selectedChair.userData.selectionBox?.update();
+                }
+            });
+        }
+
+        function teardownUI() {
+            document.getElementById('ar-button').style.display = 'block';
+            const container = document.getElementById('button-container');
+            if (container) container.remove();
+            if (placementHint) placementHint.remove();
+            if (document.getElementById('furniture-menu')) document.getElementById('furniture-menu').remove();
+            placementMode = false;
+            if (ghostChair) ghostChair.visible = false;
+            selectChair(null);
+        }
+
+        function confirmPlacement() {
+            if (placementMode && reticle.visible && loadedModels[currentFurnitureType]) {
+                const model = loadedModels[currentFurnitureType].clone();
+                model.position.copy(ghostChair.position);
+                model.quaternion.copy(ghostChair.quaternion);
+                scene.add(model);
+                chairs.push(model);
+
+                showMessage(`${furnitureLibrary[currentFurnitureType].name} placed!`);
+                
+                placementMode = false;
+                chairButton.textContent = '🛋️ Add Furniture';
+                if (ghostChair) ghostChair.visible = false;
+                placementHint.style.display = 'none';
+                confirmButton.style.display = 'none';
+                rotationControls.style.display = 'none';
+                additionalPlacementRotation = 0;
+                selectChair(null);
+            }
+        }
+
+        function deleteSelected() {
+            if (selectedChair) {
+                scene.remove(selectedChair);
+                chairs.splice(chairs.indexOf(selectedChair), 1);
+                selectChair(null);
+                showMessage('🗑️ Deleted!');
+            }
+        }
+
+        function takeSnapshot() {
+            const canvas = document.createElement('canvas');
+            canvas.width = renderer.domElement.width;
+            canvas.height = renderer.domElement.height;
+            canvas.getContext('2d').drawImage(renderer.domElement, 0, 0);
+            const link = document.createElement('a');
+            link.download = `ar-furniture-${Date.now()}.png`;
+            link.href = canvas.toDataURL();
+            link.click();
+            showMessage('📷 Saved!');
+        }
+
+        function showMessage(text) {
+            const msg = document.createElement('div');
+            msg.textContent = text;
+            msg.style.cssText = 'position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 4px; z-index: 10000;';
+            document.body.appendChild(msg);
+            setTimeout(() => msg.remove(), 2000);
+        }
+
+        function onTouchStart(event) {
+            if (placementMode || renderer.xr.isPresenting) return;
+            const touch = event.touches[0];
+            pointer.x = (touch.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const intersects = raycaster.intersectObjects(chairs, true);
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+                while (obj && !chairs.includes(obj)) obj = obj.parent;
+                if (obj) {
+                    draggingObject = obj;
+                    selectChair(obj);
+                }
+            }
+        }
+
+        function onTouchMove(event) {
+            if (!draggingObject) return;
+            const touch = event.touches[0];
+            pointer.x = (touch.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(pointer, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            if (intersects.length > 0) draggingObject.position.copy(intersects[0].point);
+        }
+
+        function onTouchEnd() { draggingObject = null; }
+
+        function onDragStart() {
+            if (placementMode) return;
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            const intersects = raycaster.intersectObjects(chairs, true);
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+                while (obj && !chairs.includes(obj)) obj = obj.parent;
+                if (obj) draggingObject = obj;
+            }
+        }
+
+        function onDragEnd() { draggingObject = null; }
+
+        function onSelect() {
+            if (!placementMode) {
+                if (renderer.xr.isPresenting) {
+                    tempMatrix.identity().extractRotation(controller.matrixWorld);
+                    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+                    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+                } else {
+                    raycaster.setFromCamera(pointer, camera);
+                }
+                const intersects = raycaster.intersectObjects(chairs, true);
+                if (intersects.length > 0) {
+                    let intersectedObj = intersects[0].object;
+                    while (intersectedObj && !chairs.includes(intersectedObj)) {
+                        intersectedObj = intersectedObj.parent;
+                    }
+                    const intersectedChair = intersectedObj;
+                    if (selectedChair === intersectedChair) {
+                        selectChair(null);
+                    } else {
+                        selectChair(intersectedChair);
+                    }
+                } else {
+                    selectChair(null);
+                }
+            }
+        }
+
+        function selectChair(chair) {
+            if (selectedChair) {
+                const box = selectedChair.userData.selectionBox;
+                if (box) {
+                    scene.remove(box);
+                    delete selectedChair.userData.selectionBox;
+                }
+            }
+            selectedChair = chair;
+            if (selectedChair) {
+                const box = new THREE.BoxHelper(selectedChair, 0xffff00);
+                scene.add(box);
+                selectedChair.userData.selectionBox = box;
+                rotationControls.style.display = 'flex';
+                deleteButton.style.display = 'block';
+                confirmButton.style.display = 'none';
+            } else {
+                rotationControls.style.display = placementMode ? 'flex' : 'none';
+                deleteButton.style.display = 'none';
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render(timestamp, frame) {
+            if (frame) {
+                const referenceSpace = renderer.xr.getReferenceSpace();
+                const session = renderer.xr.getSession();
+
+                if (hitTestSourceRequested === false) {
+                    session.requestReferenceSpace('viewer').then(function (referenceSpace) {
+                        session.requestHitTestSource({ space: referenceSpace }).then(function (source) {
+                            hitTestSource = source;
+                        });
+                    });
+                    session.addEventListener('end', function () {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                        reticle.visible = false;
+                        if (ghostChair) ghostChair.visible = false;
+                    });
+                    hitTestSourceRequested = true;
+                }
+
+                if (hitTestSource) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    if (hitTestResults.length) {
+                        const hit = hitTestResults[0];
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                        if (ghostChair && placementMode) {
+                            ghostChair.visible = true;
+                            reticle.matrix.decompose(ghostChair.position, ghostChair.quaternion, tempScale);
+                            ghostChair.rotation.set(0, 0, 0);
+                            ghostChair.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), additionalPlacementRotation);
+                        }
+                    } else {
+                        reticle.visible = false;
+                        if (ghostChair && placementMode) {
+                            ghostChair.visible = false;
+                        }
+                    }
+                } else {
+                    reticle.visible = false;
+                    if (ghostChair && placementMode) {
+                        ghostChair.visible = false;
+                    }
+                }
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>

@@ -81,7 +81,7 @@
         let additionalPlacementRotation = 0;
         let draggingObject = null;
 
-        let chairButton, confirmButton, deleteButton, snapshotButton;
+        let chairButton, confirmButton, deleteButton;
         let rotationControls, rotateLeftButton, rotateRightButton;
         let placementHint, loadingIndicator;
 
@@ -89,9 +89,9 @@
 
         const furnitureLibrary = {
             chair: { file: 'Office Chair.glb', scale: 0.5, name: 'Chair' },
-            sofa: { file: 'sofa.glb', scale: 0.8, name: 'Sofa' },
-            table: { file: 'table.glb', scale: 0.03, name: 'Table' },
-            lamp: { file: 'lamp.glb', scale: 0.09, name: 'Lamp' }
+            sofa: { file: 'sofa.glb', scale: 0.4, name: 'Sofa' },
+            table: { file: 'table.glb', scale: 0.3, name: 'Table' },
+            lamp: { file: 'lamp.glb', scale: 0.2, name: 'Lamp' }
         };
         let loadedModels = {};
         let currentFurnitureType = 'chair';
@@ -221,11 +221,6 @@
             deleteButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: white; background: #dc3545; border: none; border-radius: 4px; display: none;';
             buttonContainer.appendChild(deleteButton);
 
-            snapshotButton = document.createElement('button');
-            snapshotButton.textContent = '📷 Photo';
-            snapshotButton.style.cssText = 'margin: 5px; padding: 10px 20px; font-size: 16px; color: black; background: #ffc107; border: none; border-radius: 4px;';
-            buttonContainer.appendChild(snapshotButton);
-
             rotationControls = document.createElement('div');
             rotationControls.id = 'rotation-controls';
             rotationControls.style.cssText = 'display: none; margin-top: 10px;';
@@ -286,7 +281,6 @@
 
             confirmButton.addEventListener('click', confirmPlacement);
             deleteButton.addEventListener('click', deleteSelected);
-            snapshotButton.addEventListener('click', takeSnapshot);
 
             rotateLeftButton.addEventListener('click', () => {
                 if (placementMode && ghostChair) {
@@ -346,18 +340,6 @@
                 selectChair(null);
                 showMessage('🗑️ Deleted!');
             }
-        }
-
-        function takeSnapshot() {
-            const canvas = document.createElement('canvas');
-            canvas.width = renderer.domElement.width;
-            canvas.height = renderer.domElement.height;
-            canvas.getContext('2d').drawImage(renderer.domElement, 0, 0);
-            const link = document.createElement('a');
-            link.download = `ar-furniture-${Date.now()}.png`;
-            link.href = canvas.toDataURL();
-            link.click();
-            showMessage('📷 Saved!');
         }
 
         function showMessage(text) {
